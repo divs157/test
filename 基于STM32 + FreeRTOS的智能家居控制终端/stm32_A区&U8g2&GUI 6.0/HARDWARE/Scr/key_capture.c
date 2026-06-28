@@ -1,0 +1,92 @@
+/*-------------------------------------------------*/
+/*                                                 */
+/*            实现按键捕获功能的源文件             */
+/*                                                 */
+/*-------------------------------------------------*/
+
+#include "stm32f1xx_hal.h"    //包含需要的头文件
+#include "delay.h"            //包含需要的头文件
+#include "key_capture.h"      //包含需要的头文件
+#include "usart.h"            //包含需要的头文件
+#include "wifi.h"	          //包含需要的头文件
+
+TIM_HandleTypeDef Timer2;    //定义一个配置定时器的句柄 
+
+/*-------------------------------------------------*/
+/*函数名：按键捕获初始化程序，判断按键时间         */
+/*参  数：无                                       */
+/*返回值：无                                       */
+/*-------------------------------------------------*/	   
+void KEY_Capture_Init(void)
+{
+	TIM_IC_InitTypeDef ConfigIC;                                 //定义一个配置捕获功能的句柄    
+	
+	Timer2.Instance = TIM2;                                      //使用定时器2
+	Timer2.Init.Prescaler = 36000-1;                             //设置预分频值 72m/36000 = 2000hz 计1个数0.5ms
+	Timer2.Init.Period = 0xFFFF;                                 //周期重载值
+	Timer2.Init.CounterMode = TIM_COUNTERMODE_UP;                //向上计数
+	Timer2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;          //1分频
+	HAL_TIM_IC_Init(&Timer2);                                    //设置定时器
+
+	ConfigIC.ICPolarity = TIM_ICPOLARITY_RISING;                 //捕获上沿
+	ConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;             //直连IO
+	ConfigIC.ICPrescaler = TIM_ICPSC_DIV1;                       //1分频
+	HAL_TIM_IC_ConfigChannel(&Timer2,&ConfigIC,TIM_CHANNEL_1);   //配置定时器通道1
+	HAL_TIM_IC_Start_IT(&Timer2, TIM_CHANNEL_1);                 //使能定时器通道1的捕获中断
+}
+/*-------------------------------------------------*/
+/*函数名：配置定时器的底层硬件                     */
+/*参  数：htim：定时器句柄                         */
+/*返回值：无                                       */
+/*说  明：被HAL_TIM_IC_ConfigChannel函数调用       */
+/*-------------------------------------------------*/	 
+void HAL_TIM_IC_MspInit(TIM_HandleTypeDef* htim)
+{
+	GPIO_InitTypeDef GPIO_InitStruct;            	  //定义一个配置IO的句柄
+	
+	if(htim->Instance==TIM2){                   	  //如果是定时器2
+		__HAL_RCC_TIM2_CLK_ENABLE();             	  //使能定时器时钟
+		KEY1_GROUP_CLK_ENABLE;                        //使能按键对应的IO组时钟
+
+		GPIO_InitStruct.Pin = KEY1_PIN;               //配置按键按对应IO
+		GPIO_InitStruct.Mode = KEY1_MODE;             //配置按键按对应IO 的模式
+		GPIO_InitStruct.Pull = KEY1_PULL;             //配置按键按对应IO 的上下拉方式
+		HAL_GPIO_Init(KEY1_GROUP, &GPIO_InitStruct);  //配置IO
+		
+		HAL_NVIC_SetPriority(TIM2_IRQn, 1, 1);        //设置定时器中断，抢占优先级0，子优先级对于G0系列无效
+		HAL_NVIC_EnableIRQ(TIM2_IRQn);                //使能定时器中断
+	}
+}
+/*-------------------------------------------------*/
+/*函数名：定时器中断回调函数                       */
+/*参  数：htim_ic：定时器句柄                      */
+/*返回值：无                                       */
+/*说  明：被HAL_TIM_IRQHandler函数调用             */
+/*-------------------------------------------------*/
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+	uint32_t press_time;                             						    //定义一个变量，保存捕获的时间
+
+	if(htim->Instance==TIM2){                 	                           		//如果是定时器14
+		if(KEY1_IN_STA==KEY1_PRESS_STA){                                   	    //如果按键是按下时的电平状态
+			__HAL_TIM_DISABLE(htim);                                        	//先关闭定时器的计数    
+			__HAL_TIM_SET_COUNTER(htim,0);                                  	//设置计数器值=0
+			__HAL_TIM_ENABLE(htim);                                         	//再打开定时器计数，从0开始计数
+			htim->Instance->CCER &= ~(TIM_CCER_CC1P | TIM_CCER_CC1NP);          //清除捕获设置
+			htim->Instance->CCER |= TIM_ICPOLARITY_FALLING;                     //设置捕获下降沿  
+		} else if(KEY1_IN_STA==!KEY1_PRESS_STA){                            	//如果按键是未按下时的电平状态，也就是抬起按键了
+			__HAL_TIM_DISABLE(htim);                                      	    //关定时器计数
+			press_time = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1)/2;      //保存捕获的时间
+			htim->Instance->CCER &= ~(TIM_CCER_CC1P | TIM_CCER_CC1NP);          //清除捕获设置
+			htim->Instance->CCER |= TIM_ICPOLARITY_RISING;                      //设置捕获上升沿  
+			if(press_time>=10){                                                 //如果小于10ms，认为是抖动干扰，大于10ms的才进入if
+				u1_printf("按下：%d ms\r\n",press_time);                        //串口输出总共按下的时间值
+				if((press_time>=3000)&&(wifi_mode==1)){                         //按下事件大于3S,且wifi_mode=1					
+				 u1_printf("\r\n准备开始配网\r\n");		                        //串口输出提示信息			
+					WiFi_Smartconfig(60);                                       //配网
+					NVIC_SystemReset();                                         //重启
+				}
+		    }
+		}
+	}  
+}
